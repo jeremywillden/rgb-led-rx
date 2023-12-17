@@ -1,0 +1,80 @@
+;
+; Copyright (c) 2023 Jeremy Willden
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+.program rgbledrx
+
+reset_timeout:
+    mov x, y        ; restore the timeout value from register y
+    mov isr, null   ; clear the input shift register
+    wait 0 pin 0    ; wait here if the line is stuck high
+.wrap_target
+wait_for_bit:
+    jmp pin start_a_bit
+    jmp x-- wait_for_bit
+    jmp reset_timeout
+start_a_bit:
+    mov x, y [5]       ; restore the timeout value from register y and wait for mid bit time
+    in pins, 1         ; adjust the [5] delay for the mid-point for your specific driver
+wait_for_low:
+    jmp x-- keepgoing
+    jmp reset_timeout
+keepgoing:
+    jmp pin wait_for_low
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+#define SHIFT_LEFT false
+#define SHIFT_RIGHT true
+#define AUTO_PULL true
+#define MANUAL_PULL false
+#define AUTO_PUSH true
+#define MANUAL_PUSH false
+#define CYCLES_PER_WAIT (2)
+
+static inline void pio_rgbledrx_init(PIO pio, uint sm, uint prog_offs, uint n_bits, float freq,
+        float timeout, uint pin_rxbits) {
+    pio_sm_config c = rgbledrx_program_get_default_config(prog_offs);
+    sm_config_set_in_pins(&c, pin_rxbits);
+    sm_config_set_jmp_pin(&c, pin_rxbits);
+    sm_config_set_in_shift(&c, SHIFT_LEFT, AUTO_PUSH, n_bits);
+
+    pio_sm_set_pindirs_with_mask(pio, sm, (0u << pin_rxbits), (1u << pin_rxbits));
+    pio_gpio_init(pio, pin_rxbits);
+
+    float div = clock_get_hz(clk_sys) / (freq);
+    sm_config_set_clkdiv(&c, div);
+
+    uint entry_point = prog_offs;
+    pio_sm_init(pio, sm, entry_point, &c);
+    pio_sm_put_blocking(pio, sm, ((uint32_t)(freq * timeout / CYCLES_PER_WAIT)));
+    pio_sm_exec(pio, sm, pio_encode_pull(false, false));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_y, pio_osr));
+    pio_sm_exec(pio, sm, pio_encode_mov(pio_x, pio_y));
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static inline void pio_rgbledrx_deinit(PIO pio, uint sm) {
+    pio_sm_set_enabled(pio, sm, false);
+}
+
+/*
+Example:
+
+PIO rxpixpio = pio0;
+int rxpixsm = 0;
+uint rxpixoffset = pio_add_program(rxpixpio, &rgbledrx_program);
+printf("Loaded RGB LED Receiver program at %d\n", rxpixoffset);
+pio_rgbledrx_init(rxpixpio, rxpixsm, rxpixoffset, 32, 16.0e6, 50e-6, PIX_RX_PIN);
+
+// somewhere in your main loop, include this, making sure it executes fast enough to get all pixels
+	if (pio_sm_is_rx_fifo_empty(rxpixpio, rxpixsm)) {
+	} else {
+		uint32_t rxval = pio_sm_get(rxpixpio, rxpixsm); // pull values from FIFO so it can receive more
+	}
+*/
+
+%}
